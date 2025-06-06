@@ -99,10 +99,10 @@
       <div class="nav-links">
         <div class="scene-selector">
           <select onchange="window.location.href=this.value">
-            <option value="/scenes/basic.html" {% if page.url contains 'basic' %}selected{% endif %}>Basic</option>
-            <option value="/scenes/animation.html" {% if page.url contains 'animation' %}selected{% endif %}>Animation</option>
-            <option value="/scenes/fk.html" {% if page.url contains 'fk' %}selected{% endif %}>FK</option>
-            <option value="/scenes/ik.html" {% if page.url contains 'ik' %}selected{% endif %}>IK</option>
+            <option value="{{ site.baseurl }}/scenes/basic.html" {% if page.url contains 'basic' %}selected{% endif %}>Basic</option>
+            <option value="{{ site.baseurl }}/scenes/animation.html" {% if page.url contains 'animation' %}selected{% endif %}>Animation</option>
+            <option value="{{ site.baseurl }}/scenes/fk.html" {% if page.url contains 'fk' %}selected{% endif %}>FK</option>
+            <option value="{{ site.baseurl }}/scenes/ik.html" {% if page.url contains 'ik' %}selected{% endif %}>IK</option>
           </select>
         </div>
       </div>
