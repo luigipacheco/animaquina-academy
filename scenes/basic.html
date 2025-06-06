@@ -107,10 +107,10 @@ title: Animaquina Academy
     position: fixed;
     top: 0;
     width: 100%;
-    background: rgba(0,0,0,0.5);
+    background: rgba(0,0,0,0.7);
     color: white;
     padding: 10px 20px;
-    font-family: sans-serif;
+    font-family: monospace;
     z-index: 10;
     backdrop-filter: blur(5px);
   }
@@ -141,6 +141,80 @@ title: Animaquina Academy
   }
   .nav-link.active {
     background: rgba(255,255,255,0.2);
+  }
+  #controls-container {
+    position: fixed;
+    top: 60px;
+    right: 20px;
+    background: rgba(0,0,0,0.7);
+    color: white;
+    padding: 20px;
+    font-family: monospace;
+    border-radius: 5px;
+    backdrop-filter: blur(5px);
+    z-index: 10;
+    max-height: calc(100vh - 100px);
+    overflow-y: auto;
+  }
+  .bone-controls {
+    margin-bottom: 20px;
+    padding-bottom: 20px;
+    border-bottom: 1px solid rgba(255,255,255,0.1);
+  }
+  .bone-controls h3 {
+    margin: 0 0 10px 0;
+    font-size: 1.1rem;
+  }
+  .slider-container {
+    display: flex;
+    align-items: center;
+    margin: 5px 0;
+    gap: 10px;
+  }
+  .slider-container label {
+    min-width: 100px;
+  }
+  .slider-container input[type="range"] {
+    flex: 1;
+    -webkit-appearance: none;
+    height: 4px;
+    background: rgba(255,255,255,0.2);
+    border-radius: 2px;
+    outline: none;
+  }
+  .slider-container input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 12px;
+    height: 12px;
+    background: white;
+    border-radius: 50%;
+    cursor: pointer;
+    transition: background-color 0.3s;
+  }
+  .slider-container input[type="range"]::-webkit-slider-thumb:hover {
+    background: #ddd;
+  }
+  .value-display {
+    min-width: 50px;
+    text-align: right;
+  }
+  .reset-button {
+    position: fixed;
+    bottom: 20px;
+    right: 20px;
+    background: rgba(0,0,0,0.7);
+    color: white;
+    padding: 10px 20px;
+    font-family: monospace;
+    border-radius: 5px;
+    backdrop-filter: blur(5px);
+    z-index: 10;
+    cursor: pointer;
+    border: none;
+    transition: background-color 0.3s;
+  }
+  .reset-button:hover {
+    background: rgba(0,0,0,0.9);
   }
 </style>
 
