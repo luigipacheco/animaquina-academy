@@ -37,6 +37,7 @@ plugins:
 # Include the scenes directory
 include:
   - scenes
+  - assets
 
 # Exclude from processing
 exclude:
