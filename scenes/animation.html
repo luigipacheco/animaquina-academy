@@ -67,7 +67,7 @@ title: Animaquina Academy - Animation
 
     // Try to load the GLB file if it exists
     const loader = new GLTFLoader();
-    loader.load('/assets/scene/test.glb', 
+    loader.load('{{ site.baseurl }}/assets/scene/test.glb', 
       function(gltf) {
         // Center the model
         const box = new THREE.Box3().setFromObject(gltf.scene);

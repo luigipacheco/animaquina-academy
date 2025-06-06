@@ -589,7 +589,7 @@ title: Animaquina Academy - IK Controls
 
     // Load the model
     const loader = new GLTFLoader();
-    loader.load('/assets/scene/test.glb',
+    loader.load('{{ site.baseurl }}/assets/scene/test.glb',
       function(gltf) {
         console.log('Model loaded successfully');
         setupArmature(gltf);

@@ -48,7 +48,7 @@ title: Animaquina Academy
     scene.add(directionalLight);
 
     const loader = new GLTFLoader();
-    loader.load('/assets/scene/simple.glb', 
+    loader.load('{{ site.baseurl }}/assets/scene/simple.glb', 
       function(gltf) {
         const box = new THREE.Box3().setFromObject(gltf.scene);
         const center = box.getCenter(new THREE.Vector3());
