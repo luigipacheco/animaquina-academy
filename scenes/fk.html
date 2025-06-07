@@ -22,23 +22,34 @@ title: Animaquina Academy - FK Controls
   let bones = [];
   let originalRotations = new Map();
 
+  // Define initial joint positions in degrees
+  const initialJointPositions = {
+    'joint_1': 0,
+    'joint_2': -90,
+    'joint_3': -90,
+    'joint_4': 0,
+    'joint_5': 0,
+    'joint_6': 0
+  };
+
   function createSlider(bone, axis) {
     const container = document.createElement('div');
     container.className = 'slider-container';
     
     const label = document.createElement('label');
-    label.textContent = bone.name;
+    label.textContent = `${bone.name} (${axis.toUpperCase()})`;
     container.appendChild(label);
     
     const slider = document.createElement('input');
     slider.type = 'range';
     slider.min = -180;
     slider.max = 180;
-    slider.value = 0;
+    // Use initial position from the list
+    slider.value = initialJointPositions[bone.name] || 0;
     slider.step = 1;
     
     const valueDisplay = document.createElement('span');
-    valueDisplay.textContent = '0°';
+    valueDisplay.textContent = `${slider.value}°`;
     valueDisplay.className = 'value-display';
     
     slider.addEventListener('input', (e) => {
@@ -60,6 +71,14 @@ title: Animaquina Academy - FK Controls
         armature.updateMatrixWorld(true);
       }
     });
+
+    // Apply initial rotation
+    const initialValue = parseFloat(slider.value);
+    const rotation = bone.rotation.clone();
+    rotation[axis] = THREE.MathUtils.degToRad(initialValue);
+    bone.rotation.copy(rotation);
+    bone.updateMatrix();
+    bone.updateMatrixWorld(true);
     
     container.appendChild(slider);
     container.appendChild(valueDisplay);
@@ -73,13 +92,6 @@ title: Animaquina Academy - FK Controls
     model.traverse((object) => {
       if (object.isBone) {
         console.log('Found bone:', object.name);
-        // Rename bones
-        if (object.name === 'control') {
-          object.name = 'j6';
-        }
-        if (object.name === 'control001') {
-          object.name = 'target';
-        }
         bones.push(object);
         
         if (!armature && object.parent && object.parent.name === 'robot') {
@@ -89,31 +101,37 @@ title: Animaquina Academy - FK Controls
       }
     });
 
+    console.log('Found bones:', bones.map(b => b.name));
+
     // Sort bones by hierarchy
     bones.sort((a, b) => {
-      const aIndex = ['J1', 'J2', 'j3', 'j4', 'j5', 'j6'].indexOf(a.name);
-      const bIndex = ['J1', 'J2', 'j3', 'j4', 'j5', 'j6'].indexOf(b.name);
+      const aIndex = ['joint_1', 'joint_2', 'joint_3', 'joint_4', 'joint_5', 'joint_6'].indexOf(a.name);
+      const bIndex = ['joint_1', 'joint_2', 'joint_3', 'joint_4', 'joint_5', 'joint_6'].indexOf(b.name);
       return aIndex - bIndex;
     });
 
+    console.log('Sorted bones:', bones.map(b => b.name));
+
     // Create sliders for each bone
     const controlsContainer = document.getElementById('controls-container');
+    if (!controlsContainer) {
+      console.error('Controls container not found!');
+      return;
+    }
     controlsContainer.innerHTML = ''; // Clear existing controls
 
     // Define allowed rotation axes for each joint
     const jointConstraints = {
-      'J1': ['y'],
-      'J2': ['z'],
-      'j3': ['y'],
-      'j4': ['y'],
-      'j5': ['x'],
-      'j6': ['y']
+      'joint_1': ['y'],  // Only Y axis
+      'joint_2': ['y'],  // Only Y axis
+      'joint_3': ['x'],  // Only X axis
+      'joint_4': ['y'],  // Only Y axis
+      'joint_5': ['x'],  // Only X axis
+      'joint_6': ['y']   // Only Y axis
     };
 
     bones.forEach(bone => {
-      // Skip target bone
-      if (bone.name === 'target') return;
-
+      console.log('Creating controls for bone:', bone.name);
       const boneContainer = document.createElement('div');
       boneContainer.className = 'bone-controls';
       
@@ -121,23 +139,30 @@ title: Animaquina Academy - FK Controls
       boneName.textContent = bone.name;
       boneContainer.appendChild(boneName);
       
-      // Create sliders only for allowed rotation axes
-      const allowedAxes = jointConstraints[bone.name] || ['x', 'y', 'z'];
-      allowedAxes.forEach(axis => {
-        const slider = createSlider(bone, axis);
+      // Create slider only for the allowed rotation axis
+      const allowedAxis = jointConstraints[bone.name]?.[0];
+      if (allowedAxis) {
+        console.log(`Creating slider for ${bone.name} on ${allowedAxis} axis`);
+        const slider = createSlider(bone, allowedAxis);
         boneContainer.appendChild(slider);
-      });
+      } else {
+        console.warn(`No rotation axis defined for bone: ${bone.name}`);
+      }
       
       controlsContainer.appendChild(boneContainer);
     });
   }
 
   function resetRotations() {
-    // Reset all sliders to 0
-    document.querySelectorAll('input[type="range"]').forEach(slider => {
-      slider.value = 0;
-      // Trigger the input event to update the rotation
-      slider.dispatchEvent(new Event('input'));
+    // Reset all sliders to their initial positions
+    document.querySelectorAll('.bone-controls').forEach(boneContainer => {
+      const boneName = boneContainer.querySelector('h3').textContent;
+      const slider = boneContainer.querySelector('input[type="range"]');
+      if (slider) {
+        slider.value = initialJointPositions[boneName] || 0;
+        // Trigger the input event to update the rotation
+        slider.dispatchEvent(new Event('input'));
+      }
     });
   }
 
@@ -169,7 +194,7 @@ title: Animaquina Academy - FK Controls
     scene.add(directionalLight);
 
     const loader = new GLTFLoader();
-    loader.load('{{ site.baseurl }}/assets/scene/simple.glb', 
+    loader.load('{{ site.baseurl }}/assets/scene/newsimple.glb', 
       function(gltf) {
         const box = new THREE.Box3().setFromObject(gltf.scene);
         const center = box.getCenter(new THREE.Vector3());

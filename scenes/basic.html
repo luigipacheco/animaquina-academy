@@ -20,6 +20,16 @@ title: Animaquina Academy
   let scene, camera, renderer, controls;
   let model;
 
+  // Define initial joint positions in degrees
+  const initialJointPositions = {
+    'joint_1': 0,
+    'joint_2': -90,
+    'joint_3': -90,
+    'joint_4': 0,
+    'joint_5': 0,
+    'joint_6': 0
+  };
+
   function init() {
     scene = new THREE.Scene();
     scene.background = new THREE.Color(0x000000);
@@ -48,7 +58,7 @@ title: Animaquina Academy
     scene.add(directionalLight);
 
     const loader = new GLTFLoader();
-    loader.load('{{ site.baseurl }}/assets/scene/simple.glb', 
+    loader.load('{{ site.baseurl }}/assets/scene/newsimple.glb', 
       function(gltf) {
         const box = new THREE.Box3().setFromObject(gltf.scene);
         const center = box.getCenter(new THREE.Vector3());
@@ -61,6 +71,30 @@ title: Animaquina Academy
         
         scene.add(gltf.scene);
         model = gltf.scene;
+
+        // Set initial rotations for joints
+        model.traverse((object) => {
+          if (object.isBone) {
+            const initialRotation = initialJointPositions[object.name];
+            if (initialRotation !== undefined) {
+              // Get the correct axis based on the joint
+              let axis;
+              if (object.name === 'joint_3' || object.name === 'joint_5') {
+                axis = 'x';  // These joints rotate on X axis
+              } else if (object.name === 'joint_1' || object.name === 'joint_2' || object.name === 'joint_4' || object.name === 'joint_6') {
+                axis = 'y';  // These joints rotate on Y axis
+              }
+
+              if (axis) {
+                const rotation = object.rotation.clone();
+                rotation[axis] = THREE.MathUtils.degToRad(initialRotation);
+                object.rotation.copy(rotation);
+                object.updateMatrix();
+                object.updateMatrixWorld(true);
+              }
+            }
+          }
+        });
       },
       undefined,
       function(error) {
