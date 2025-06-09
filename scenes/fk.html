@@ -1,13 +1,14 @@
 ---
 layout: fullscreen
-title: Animaquina Academy - FK Controls
+title: Forward Kinematics
 ---
 
 <script type="importmap">
   {
     "imports": {
       "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
-      "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+      "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/",
+      "lil-gui": "https://unpkg.com/lil-gui@0.19.1/dist/lil-gui.esm.js"
     }
   }
 </script>
@@ -16,11 +17,13 @@ title: Animaquina Academy - FK Controls
   import * as THREE from 'three';
   import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
   import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+  import GUI from 'lil-gui';
 
   let scene, camera, renderer, controls;
   let model, armature;
   let bones = [];
   let originalRotations = new Map();
+  let gui;
 
   // Define initial joint positions in degrees
   const initialJointPositions = {
@@ -32,57 +35,104 @@ title: Animaquina Academy - FK Controls
     'joint_6': 0
   };
 
-  function createSlider(bone, axis) {
-    const container = document.createElement('div');
-    container.className = 'slider-container';
+  // Define allowed rotation axes for each joint
+  const jointConstraints = {
+    'joint_1': ['y'],  // Only Y axis
+    'joint_2': ['y'],  // Only Y axis
+    'joint_3': ['x'],  // Only X axis
+    'joint_4': ['y'],  // Only Y axis
+    'joint_5': ['x'],  // Only X axis
+    'joint_6': ['y']   // Only Y axis
+  };
+
+  function createGUI() {
+    gui = new GUI({ width: 300 });
+    gui.domElement.style.position = 'absolute';
+    gui.domElement.style.top = '60px';
+    gui.domElement.style.right = '20px';
+
+    // Create a single folder for all joints
+    const jointsFolder = gui.addFolder('Joint Rotations');
     
-    const label = document.createElement('label');
-    label.textContent = `${bone.name} (${axis.toUpperCase()})`;
-    container.appendChild(label);
+    // Store controllers for reset functionality
+    const controllers = new Map();
     
-    const slider = document.createElement('input');
-    slider.type = 'range';
-    slider.min = -180;
-    slider.max = 180;
-    // Use initial position from the list
-    slider.value = initialJointPositions[bone.name] || 0;
-    slider.step = 1;
-    
-    const valueDisplay = document.createElement('span');
-    valueDisplay.textContent = `${slider.value}°`;
-    valueDisplay.className = 'value-display';
-    
-    slider.addEventListener('input', (e) => {
-      const value = parseFloat(e.target.value);
-      valueDisplay.textContent = `${value}°`;
+    // Add sliders for each joint
+    bones.forEach(bone => {
+      const allowedAxis = jointConstraints[bone.name]?.[0];
       
-      // Update bone rotation
-      const rotation = bone.rotation.clone();
-      rotation[axis] = THREE.MathUtils.degToRad(value);
-      bone.rotation.copy(rotation);
-      
-      // Update matrices
-      bone.updateMatrix();
-      bone.updateMatrixWorld(true);
-      
-      // Force update the armature
-      if (armature) {
-        armature.updateMatrix();
-        armature.updateMatrixWorld(true);
+      if (allowedAxis) {
+        const rotationObj = {
+          rotation: initialJointPositions[bone.name] || 0
+        };
+
+        // Extract joint number (1-6) from bone name
+        const jointNumber = bone.name.split('_')[1];
+        
+        const controller = jointsFolder.add(rotationObj, 'rotation', -180, 180, 1)
+          .name(`J${jointNumber}`)
+          .onChange((value) => {
+            const rotation = bone.rotation.clone();
+            rotation[allowedAxis] = THREE.MathUtils.degToRad(value);
+            bone.rotation.copy(rotation);
+            
+            // Update matrices
+            bone.updateMatrix();
+            bone.updateMatrixWorld(true);
+            
+            // Force update the armature
+            if (armature) {
+              armature.updateMatrix();
+              armature.updateMatrixWorld(true);
+            }
+          });
+
+        // Store controller for reset functionality
+        controllers.set(bone.name, controller);
       }
     });
-
-    // Apply initial rotation
-    const initialValue = parseFloat(slider.value);
-    const rotation = bone.rotation.clone();
-    rotation[axis] = THREE.MathUtils.degToRad(initialValue);
-    bone.rotation.copy(rotation);
-    bone.updateMatrix();
-    bone.updateMatrixWorld(true);
     
-    container.appendChild(slider);
-    container.appendChild(valueDisplay);
-    return container;
+    jointsFolder.open();
+
+    // Add reset button
+    const resetFolder = gui.addFolder('Actions');
+    resetFolder.add({ 
+      reset: () => {
+        // Reset all bones to their initial positions
+        bones.forEach(bone => {
+          const allowedAxis = jointConstraints[bone.name]?.[0];
+          if (allowedAxis) {
+            const rotation = bone.rotation.clone();
+            rotation[allowedAxis] = THREE.MathUtils.degToRad(initialJointPositions[bone.name] || 0);
+            bone.rotation.copy(rotation);
+            bone.updateMatrix();
+            bone.updateMatrixWorld(true);
+          }
+        });
+
+        // Update GUI values
+        controllers.forEach((controller, boneName) => {
+          controller.setValue(initialJointPositions[boneName] || 0);
+        });
+      }
+    }, 'reset').name('Reset Rotations');
+    resetFolder.open();
+
+    // Apply initial rotations
+    bones.forEach(bone => {
+      const allowedAxis = jointConstraints[bone.name]?.[0];
+      if (allowedAxis) {
+        const rotation = bone.rotation.clone();
+        rotation[allowedAxis] = THREE.MathUtils.degToRad(initialJointPositions[bone.name] || 0);
+        bone.rotation.copy(rotation);
+        bone.updateMatrix();
+        bone.updateMatrixWorld(true);
+      }
+    });
+  }
+
+  function resetRotations() {
+    // This function is now handled by the reset button in the GUI
   }
 
   function setupBones() {
@@ -112,58 +162,8 @@ title: Animaquina Academy - FK Controls
 
     console.log('Sorted bones:', bones.map(b => b.name));
 
-    // Create sliders for each bone
-    const controlsContainer = document.getElementById('controls-container');
-    if (!controlsContainer) {
-      console.error('Controls container not found!');
-      return;
-    }
-    controlsContainer.innerHTML = ''; // Clear existing controls
-
-    // Define allowed rotation axes for each joint
-    const jointConstraints = {
-      'joint_1': ['y'],  // Only Y axis
-      'joint_2': ['y'],  // Only Y axis
-      'joint_3': ['x'],  // Only X axis
-      'joint_4': ['y'],  // Only Y axis
-      'joint_5': ['x'],  // Only X axis
-      'joint_6': ['y']   // Only Y axis
-    };
-
-    bones.forEach(bone => {
-      console.log('Creating controls for bone:', bone.name);
-      const boneContainer = document.createElement('div');
-      boneContainer.className = 'bone-controls';
-      
-      const boneName = document.createElement('h3');
-      boneName.textContent = bone.name;
-      boneContainer.appendChild(boneName);
-      
-      // Create slider only for the allowed rotation axis
-      const allowedAxis = jointConstraints[bone.name]?.[0];
-      if (allowedAxis) {
-        console.log(`Creating slider for ${bone.name} on ${allowedAxis} axis`);
-        const slider = createSlider(bone, allowedAxis);
-        boneContainer.appendChild(slider);
-      } else {
-        console.warn(`No rotation axis defined for bone: ${bone.name}`);
-      }
-      
-      controlsContainer.appendChild(boneContainer);
-    });
-  }
-
-  function resetRotations() {
-    // Reset all sliders to their initial positions
-    document.querySelectorAll('.bone-controls').forEach(boneContainer => {
-      const boneName = boneContainer.querySelector('h3').textContent;
-      const slider = boneContainer.querySelector('input[type="range"]');
-      if (slider) {
-        slider.value = initialJointPositions[boneName] || 0;
-        // Trigger the input event to update the rotation
-        slider.dispatchEvent(new Event('input'));
-      }
-    });
+    // Create GUI after bones are set up
+    createGUI();
   }
 
   function init() {
@@ -217,13 +217,6 @@ title: Animaquina Academy - FK Controls
         
         // Setup bones and controls
         setupBones();
-
-        // Add reset button
-        const resetButton = document.createElement('button');
-        resetButton.textContent = 'Reset Rotations';
-        resetButton.className = 'reset-button';
-        resetButton.onclick = resetRotations;
-        document.body.appendChild(resetButton);
       },
       undefined,
       function(error) {
@@ -266,120 +259,7 @@ title: Animaquina Academy - FK Controls
     top: 0;
     left: 0;
   }
-  nav {
-    position: fixed;
-    top: 0;
-    width: 100%;
-    background: rgba(0,0,0,0.7);
-    color: white;
-    padding: 10px 20px;
-    font-family: monospace;
-    z-index: 10;
-    backdrop-filter: blur(5px);
+  .lil-gui {
+    z-index: 1000 !important;
   }
-  .nav-content {
-    display: flex;
-    justify-content: space-between;
-    align-items: center;
-    max-width: 1200px;
-    margin: 0 auto;
-  }
-  nav h1 {
-    margin: 0;
-    font-size: 1.2rem;
-  }
-  .nav-links {
-    display: flex;
-    gap: 20px;
-  }
-  .nav-link {
-    color: white;
-    text-decoration: none;
-    padding: 5px 10px;
-    border-radius: 4px;
-    transition: background-color 0.3s;
-  }
-  .nav-link:hover {
-    background: rgba(255,255,255,0.1);
-  }
-  .nav-link.active {
-    background: rgba(255,255,255,0.2);
-  }
-  #controls-container {
-    position: fixed;
-    top: 60px;
-    right: 20px;
-    background: rgba(0,0,0,0.7);
-    color: white;
-    padding: 20px;
-    font-family: monospace;
-    border-radius: 5px;
-    backdrop-filter: blur(5px);
-    z-index: 10;
-    max-height: calc(100vh - 100px);
-    overflow-y: auto;
-  }
-  .bone-controls {
-    margin-bottom: 20px;
-    padding-bottom: 20px;
-    border-bottom: 1px solid rgba(255,255,255,0.1);
-  }
-  .bone-controls h3 {
-    margin: 0 0 10px 0;
-    font-size: 1.1rem;
-  }
-  .slider-container {
-    display: flex;
-    align-items: center;
-    margin: 5px 0;
-    gap: 10px;
-  }
-  .slider-container label {
-    min-width: 100px;
-  }
-  .slider-container input[type="range"] {
-    flex: 1;
-    -webkit-appearance: none;
-    height: 4px;
-    background: rgba(255,255,255,0.2);
-    border-radius: 2px;
-    outline: none;
-  }
-  .slider-container input[type="range"]::-webkit-slider-thumb {
-    -webkit-appearance: none;
-    width: 12px;
-    height: 12px;
-    background: white;
-    border-radius: 50%;
-    cursor: pointer;
-    transition: background-color 0.3s;
-  }
-  .slider-container input[type="range"]::-webkit-slider-thumb:hover {
-    background: #ddd;
-  }
-  .value-display {
-    min-width: 50px;
-    text-align: right;
-  }
-  .reset-button {
-    position: fixed;
-    bottom: 20px;
-    right: 20px;
-    background: rgba(0,0,0,0.7);
-    color: white;
-    padding: 10px 20px;
-    font-family: monospace;
-    border-radius: 5px;
-    backdrop-filter: blur(5px);
-    z-index: 10;
-    cursor: pointer;
-    border: none;
-    transition: background-color 0.3s;
-  }
-  .reset-button:hover {
-    background: rgba(0,0,0,0.9);
-  }
-</style>
-
-<div id="controls-container"></div>
-<button class="reset-button" onclick="resetRotations()">Reset Rotations</button> 
+</style> 

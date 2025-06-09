@@ -7,7 +7,8 @@ title: Animaquina Academy - Animation
   {
     "imports": {
       "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
-      "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+      "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/",
+      "lil-gui": "https://unpkg.com/lil-gui@0.19.1/dist/lil-gui.esm.js"
     }
   }
 </script>
@@ -17,6 +18,7 @@ title: Animaquina Academy - Animation
   import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
   import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
   import { TransformControls } from 'three/addons/controls/TransformControls.js';
+  import GUI from 'lil-gui';
 
   let scene, camera, renderer, controls, transformControl;
   let model;
@@ -27,6 +29,7 @@ title: Animaquina Academy - Animation
   let originalScale = new THREE.Vector3();
   let animations = [];
   let currentAnimation = null;
+  let gui;
 
   function init() {
     scene = new THREE.Scene();
@@ -117,12 +120,15 @@ title: Animaquina Academy - Animation
       switch (event.key.toLowerCase()) {
         case 'g': // translate
           transformControl.setMode('translate');
+          gui.controllers.find(c => c.property === 'mode').setValue('translate');
           break;
         case 'r': // rotate
           transformControl.setMode('rotate');
+          gui.controllers.find(c => c.property === 'mode').setValue('rotate');
           break;
         case 's': // scale
           transformControl.setMode('scale');
+          gui.controllers.find(c => c.property === 'mode').setValue('scale');
           break;
         case 'z': // reset transformations
           if (event.ctrlKey || event.metaKey) {
@@ -143,19 +149,56 @@ title: Animaquina Academy - Animation
   }
 
   function createAnimationControls() {
-    const controlsDiv = document.createElement('div');
-    controlsDiv.className = 'animation-controls';
-    controlsDiv.innerHTML = `
-      <div class="animation-list">
-        ${animations.map((anim, index) => `
-          <button onclick="playAnimation(${index})">Animation ${index + 1}</button>
-        `).join('')}
-      </div>
-      <div class="animation-info">
-        <p>Space - Play/Pause</p>
-      </div>
-    `;
-    document.body.appendChild(controlsDiv);
+    gui = new GUI({ width: 300 });
+    gui.domElement.style.position = 'absolute';
+    gui.domElement.style.top = '60px';
+    gui.domElement.style.right = '20px';
+
+    // Create animation folder
+    const animFolder = gui.addFolder('Animations');
+    
+    // Add animation selection
+    const animOptions = {};
+    animations.forEach((_, index) => {
+      animOptions[`Animation ${index + 1}`] = index;
+    });
+    
+    animFolder.add({ animation: 0 }, 'animation', animOptions)
+      .name('Select Animation')
+      .onChange((value) => {
+        playAnimation(value);
+      });
+
+    // Add play/pause button
+    const playPauseObj = {
+      playPause: () => {
+        if (currentAnimation) {
+          if (currentAnimation.isRunning()) {
+            currentAnimation.stop();
+          } else {
+            currentAnimation.play();
+          }
+        }
+      }
+    };
+    animFolder.add(playPauseObj, 'playPause').name('Play/Pause');
+
+    // Add transform controls folder
+    const transformFolder = gui.addFolder('Transform Controls');
+    transformFolder.add({ mode: 'translate' }, 'mode', ['translate', 'rotate', 'scale'])
+      .name('Transform Mode')
+      .onChange((value) => {
+        transformControl.setMode(value);
+      });
+
+    // Add reset button
+    const resetFolder = gui.addFolder('Actions');
+    resetFolder.add({ reset: resetTransformations }, 'reset').name('Reset Transformations');
+
+    // Open all folders by default
+    animFolder.open();
+    transformFolder.open();
+    resetFolder.open();
   }
 
   function playAnimation(index) {
@@ -359,6 +402,9 @@ title: Animaquina Academy - Animation
   .animation-controls .time-display {
     margin: 0 10px;
     font-family: monospace;
+  }
+  .lil-gui {
+    z-index: 1000 !important;
   }
 </style>
 

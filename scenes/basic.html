@@ -1,13 +1,14 @@
 ---
 layout: fullscreen
-title: Animaquina Academy
+title: Animaquina Academy - Basic Scene
 ---
 
 <script type="importmap">
   {
     "imports": {
       "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
-      "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/"
+      "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/",
+      "lil-gui": "https://unpkg.com/lil-gui@0.19.1/dist/lil-gui.esm.js"
     }
   }
 </script>
@@ -16,9 +17,11 @@ title: Animaquina Academy
   import * as THREE from 'three';
   import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
   import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+  import GUI from 'lil-gui';
 
   let scene, camera, renderer, controls;
   let model;
+  let gui;
 
   // Define initial joint positions in degrees
   const initialJointPositions = {
@@ -29,6 +32,31 @@ title: Animaquina Academy
     'joint_5': 0,
     'joint_6': 0
   };
+
+  function createGUI() {
+    gui = new GUI({ width: 300 });
+    gui.domElement.style.position = 'absolute';
+    gui.domElement.style.top = '60px';
+    gui.domElement.style.right = '20px';
+
+    // Create scene folder
+    const sceneFolder = gui.addFolder('Scene');
+    sceneFolder.add(scene, 'background', { 
+      'White': 0xffffff,
+      'Black': 0x000000,
+      'Gray': 0x808080
+    }).name('Background Color');
+
+    // Create camera folder
+    const cameraFolder = gui.addFolder('Camera');
+    cameraFolder.add(camera.position, 'x', -10, 10).name('Position X');
+    cameraFolder.add(camera.position, 'y', -10, 10).name('Position Y');
+    cameraFolder.add(camera.position, 'z', -10, 10).name('Position Z');
+
+    // Open all folders by default
+    sceneFolder.open();
+    cameraFolder.open();
+  }
 
   function init() {
     scene = new THREE.Scene();
@@ -249,6 +277,9 @@ title: Animaquina Academy
   }
   .reset-button:hover {
     background: rgba(0,0,0,0.9);
+  }
+  .lil-gui {
+    z-index: 1000 !important;
   }
 </style>
 

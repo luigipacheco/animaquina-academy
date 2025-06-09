@@ -24,10 +24,10 @@
       position: fixed;
       top: 0;
       width: 100%;
-      background: rgba(0,0,0,0.5);
+      background: rgba(0,0,0,0.7);
       color: white;
       padding: 10px 20px;
-      font-family: sans-serif;
+      font-family: monospace;
       z-index: 10;
       backdrop-filter: blur(5px);
     }
@@ -71,10 +71,11 @@
       padding: 5px 10px;
       border-radius: 4px;
       cursor: pointer;
-      font-family: sans-serif;
+      font-family: monospace;
       font-size: 1em;
       appearance: none;
       padding-right: 25px;
+      min-width: 150px;
     }
     .scene-selector select:hover {
       background: rgba(0,0,0,0.7);
@@ -97,14 +98,7 @@
     <div class="nav-content">
       <h1>{{ page.title }}</h1>
       <div class="nav-links">
-        <div class="scene-selector">
-          <select onchange="window.location.href=this.value">
-            <option value="{{ site.baseurl }}/scenes/basic.html" {% if page.url contains 'basic' %}selected{% endif %}>Basic</option>
-            <option value="{{ site.baseurl }}/scenes/animation.html" {% if page.url contains 'animation' %}selected{% endif %}>Animation</option>
-            <option value="{{ site.baseurl }}/scenes/fk.html" {% if page.url contains 'fk' %}selected{% endif %}>FK</option>
-            <option value="{{ site.baseurl }}/scenes/ik.html" {% if page.url contains 'ik' %}selected{% endif %}>IK</option>
-          </select>
-        </div>
+        {% include scene-nav.html %}
       </div>
     </div>
   </nav>

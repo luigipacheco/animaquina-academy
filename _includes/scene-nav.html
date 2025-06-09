@@ -1,0 +1,12 @@
+{% assign scenes = site.pages | where: "layout", "fullscreen" | sort: "title" %}
+<div class="scene-selector">
+  <select onchange="window.location.href=this.value">
+    {% for scene in scenes %}
+      {% assign scene_name = scene.path | split: '/' | last | replace: '.html', '' %}
+      {% assign scene_title = scene.title | default: scene_name | split: '-' | join: ' ' | capitalize %}
+      <option value="{{ site.baseurl }}{{ scene.url }}" {% if page.url == scene.url %}selected{% endif %}>
+        {{ scene_title }}
+      </option>
+    {% endfor %}
+  </select>
+</div> 

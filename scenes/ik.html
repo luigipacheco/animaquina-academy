@@ -1,0 +1,503 @@
+---
+layout: fullscreen
+title: Inverse Kinematics
+---
+
+<script type="importmap">
+  {
+    "imports": {
+      "three": "https://unpkg.com/three@0.160.0/build/three.module.js",
+      "three/addons/": "https://unpkg.com/three@0.160.0/examples/jsm/",
+      "lil-gui": "https://unpkg.com/lil-gui@0.19.1/dist/lil-gui.esm.js"
+    }
+  }
+</script>
+
+<script type="module">
+  import * as THREE from 'three';
+  import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+  import { GLTFLoader } from 'three/addons/loaders/GLTFLoader.js';
+  import { TransformControls } from 'three/addons/controls/TransformControls.js';
+  import GUI from 'lil-gui';
+
+  let scene, camera, renderer, controls;
+  let model, armature, bones = [];
+  let boneLines = [];
+  let target, raycaster, mouse, plane;
+  let isDragging = false;
+  let dragPlane = new THREE.Plane();
+  let dragPoint = new THREE.Vector3();
+  let maxIterations = 10;
+  let tolerance = 0.01;
+  let transformControl;
+  let gui;
+
+  // Define joint constraints based on FK file
+  const jointConstraints = {
+    'joint_1': { axis: 'y', min: THREE.MathUtils.degToRad(-170), max: THREE.MathUtils.degToRad(170), rotationOrder: 'YXZ' },  // A1 ±170°
+    'joint_2': { axis: 'x', min: THREE.MathUtils.degToRad(-190), max: THREE.MathUtils.degToRad(45), rotationOrder: 'XYZ' },   // A2 -190° / 45°
+    'joint_3': { axis: 'x', min: THREE.MathUtils.degToRad(-120), max: THREE.MathUtils.degToRad(156), rotationOrder: 'XYZ' },  // A3 -120° / 156°
+    'joint_4': { axis: 'y', min: THREE.MathUtils.degToRad(-185), max: THREE.MathUtils.degToRad(185), rotationOrder: 'YXZ' },  // A4 ±185°
+    'joint_5': { axis: 'x', min: THREE.MathUtils.degToRad(-120), max: THREE.MathUtils.degToRad(120), rotationOrder: 'XYZ' },  // A5 ±120°
+    'joint_6': { axis: 'y', min: THREE.MathUtils.degToRad(-350), max: THREE.MathUtils.degToRad(350), rotationOrder: 'YXZ' }   // A6 ±350°
+  };
+
+  // Create GUI controls
+  function createGUI() {
+    gui = new GUI({ width: 300 });
+    gui.domElement.style.position = 'absolute';
+    gui.domElement.style.top = '60px';
+    gui.domElement.style.right = '20px';
+
+    // Create a folder for each joint
+    Object.keys(jointConstraints).forEach(jointName => {
+      const folder = gui.addFolder(jointName);
+      const constraint = jointConstraints[jointName];
+      
+      // Add axis selection
+      const axisOptions = {
+        'X Axis': 'x',
+        'Y Axis': 'y',
+        'Z Axis': 'z'
+      };
+      
+      const currentAxis = Object.entries(axisOptions).find(([_, value]) => value === constraint.axis)?.[0] || 'Y Axis';
+      
+      folder.add({ axis: currentAxis }, 'axis', Object.keys(axisOptions))
+        .name('Rotation Axis')
+        .onChange((value) => {
+          constraint.axis = axisOptions[value];
+          // Update rotation order based on selected axis
+          if (constraint.axis === 'x') {
+            constraint.rotationOrder = 'XYZ';
+          } else if (constraint.axis === 'y') {
+            constraint.rotationOrder = 'YXZ';
+          } else {
+            constraint.rotationOrder = 'ZXY';
+          }
+        });
+
+      folder.open();
+    });
+
+    // Add IK settings
+    const ikFolder = gui.addFolder('IK Settings');
+    ikFolder.add({ maxIterations }, 'maxIterations', 1, 20, 1).name('Max Iterations');
+    ikFolder.add({ tolerance }, 'tolerance', 0.001, 0.1, 0.001).name('Tolerance');
+    ikFolder.open();
+
+    // Add reset button
+    const resetFolder = gui.addFolder('Actions');
+    resetFolder.add({ reset: () => resetRotations() }, 'reset').name('Reset Rotations');
+    resetFolder.open();
+  }
+
+  function createBoneLine(bone1, bone2) {
+    const points = [
+      bone1.getWorldPosition(new THREE.Vector3()),
+      bone2.getWorldPosition(new THREE.Vector3())
+    ];
+    const geometry = new THREE.BufferGeometry().setFromPoints(points);
+    const material = new THREE.LineBasicMaterial({ color: 0x00ff00 });
+    const line = new THREE.Line(geometry, material);
+    scene.add(line);
+    boneLines.push({ line, bone1, bone2 });
+    return line;
+  }
+
+  function updateBoneLines() {
+    boneLines.forEach(({ line, bone1, bone2 }) => {
+      const positions = line.geometry.attributes.position;
+      const pos1 = bone1.getWorldPosition(new THREE.Vector3());
+      const pos2 = bone2.getWorldPosition(new THREE.Vector3());
+      
+      positions.setXYZ(0, pos1.x, pos1.y, pos1.z);
+      positions.setXYZ(1, pos2.x, pos2.y, pos2.z);
+      positions.needsUpdate = true;
+    });
+  }
+
+  function createTarget() {
+    // Create target sphere
+    const geometry = new THREE.SphereGeometry(0.15, 32, 32);
+    const material = new THREE.MeshBasicMaterial({ 
+      color: 0xffff00,
+      transparent: true,
+      opacity: 0.6
+    });
+    target = new THREE.Mesh(geometry, material);
+    
+    // Add a direction indicator to the target
+    const arrowGeometry = new THREE.ConeGeometry(0.05, 0.2, 8);
+    const arrowMaterial = new THREE.MeshBasicMaterial({ color: 0xff0000 });
+    const arrow = new THREE.Mesh(arrowGeometry, arrowMaterial);
+    arrow.position.y = 0.15; // Position at top of sphere
+    arrow.rotation.x = -Math.PI / 2; // Point upward
+    target.add(arrow);
+    
+    // Add an up indicator
+    const upArrowGeometry = new THREE.ConeGeometry(0.05, 0.2, 8);
+    const upArrowMaterial = new THREE.MeshBasicMaterial({ color: 0x00ff00 });
+    const upArrow = new THREE.Mesh(upArrowGeometry, upArrowMaterial);
+    upArrow.position.z = 0.15; // Position at front of sphere
+    upArrow.rotation.x = Math.PI; // Point forward
+    target.add(upArrow);
+    
+    scene.add(target);
+
+    // Add transform controls
+    transformControl = new TransformControls(camera, renderer.domElement);
+    transformControl.attach(target);
+    transformControl.addEventListener('dragging-changed', function(event) {
+      controls.enabled = !event.value;
+    });
+    scene.add(transformControl);
+
+    // Create invisible plane for dragging
+    plane = new THREE.Plane(new THREE.Vector3(0, 1, 0), 0);
+  }
+
+  function constrainRotation(bone, targetRotation) {
+    const constraint = jointConstraints[bone.name];
+    if (!constraint) return targetRotation;
+
+    // Convert to Euler angles with the correct rotation order
+    const euler = new THREE.Euler();
+    euler.setFromQuaternion(targetRotation, constraint.rotationOrder);
+    
+    // Create a new Euler with only the allowed axis rotation
+    const constrainedEuler = new THREE.Euler(0, 0, 0, constraint.rotationOrder);
+    
+    // Get the rotation value from the appropriate axis
+    const rotationValue = euler[constraint.axis];
+    
+    // Apply the rotation only to the selected axis
+    constrainedEuler[constraint.axis] = Math.max(
+      constraint.min,
+      Math.min(constraint.max, rotationValue)
+    );
+
+    // Convert back to quaternion
+    return new THREE.Quaternion().setFromEuler(constrainedEuler);
+  }
+
+  function solveIK() {
+    const targetPos = target.position.clone();
+    const targetRot = target.quaternion.clone();
+    const endEffector = bones[bones.length - 1];
+    const endEffectorPos = endEffector.getWorldPosition(new THREE.Vector3());
+    
+    if (endEffectorPos.distanceTo(targetPos) > 5) {
+      const direction = targetPos.clone().sub(endEffectorPos).normalize();
+      const rotation = new THREE.Quaternion().setFromUnitVectors(
+        new THREE.Vector3(0, 1, 0),
+        direction
+      );
+      endEffector.quaternion.copy(constrainRotation(endEffector, rotation));
+      return;
+    }
+
+    const damping = 0.3;
+    for (let iteration = 0; iteration < maxIterations; iteration++) {
+      let maxError = 0;
+      
+      for (let i = bones.length - 1; i >= 0; i--) {
+        const bone = bones[i];
+        const bonePos = bone.getWorldPosition(new THREE.Vector3());
+        const endPos = endEffector.getWorldPosition(new THREE.Vector3());
+        
+        const toEnd = endPos.clone().sub(bonePos).normalize();
+        const toTarget = targetPos.clone().sub(bonePos).normalize();
+        
+        let rotation = new THREE.Quaternion().setFromUnitVectors(toEnd, toTarget);
+        
+        if (i === bones.length - 1) {
+          const currentForward = new THREE.Vector3(0, 1, 0).applyQuaternion(endEffector.quaternion);
+          const currentUp = new THREE.Vector3(0, 0, 1).applyQuaternion(endEffector.quaternion);
+          const targetForward = new THREE.Vector3(0, 1, 0).applyQuaternion(targetRot);
+          const targetUp = new THREE.Vector3(0, 0, 1).applyQuaternion(targetRot);
+          
+          const forwardRotation = new THREE.Quaternion().setFromUnitVectors(currentForward, targetForward);
+          const upRotation = new THREE.Quaternion().setFromUnitVectors(
+            currentUp.applyQuaternion(forwardRotation),
+            targetUp
+          );
+          
+          rotation = forwardRotation.multiply(upRotation);
+        }
+        
+        rotation.slerp(new THREE.Quaternion(), 1 - damping);
+        const constrainedRotation = constrainRotation(bone, rotation);
+        const currentRotation = bone.quaternion.clone();
+        bone.quaternion.slerp(currentRotation.multiply(constrainedRotation), damping);
+        
+        const newEndPos = endEffector.getWorldPosition(new THREE.Vector3());
+        const error = newEndPos.distanceTo(targetPos);
+        maxError = Math.max(maxError, error);
+        
+        if (error < tolerance) {
+          return;
+        }
+      }
+      
+      if (maxError < tolerance * 2) {
+        break;
+      }
+    }
+  }
+
+  function init() {
+    scene = new THREE.Scene();
+    scene.background = new THREE.Color(0x000000);
+
+    camera = new THREE.PerspectiveCamera(45, window.innerWidth/window.innerHeight, 0.1, 1000);
+    camera.position.set(0, 5, 10);
+
+    renderer = new THREE.WebGLRenderer({ antialias: true });
+    renderer.setSize(window.innerWidth, window.innerHeight);
+    renderer.setPixelRatio(window.devicePixelRatio);
+    document.body.appendChild(renderer.domElement);
+
+    controls = new OrbitControls(camera, renderer.domElement);
+    controls.enableDamping = true;
+    controls.dampingFactor = 0.05;
+    controls.screenSpacePanning = false;
+    controls.minDistance = 1;
+    controls.maxDistance = 20;
+    controls.maxPolarAngle = Math.PI / 2;
+
+    const ambientLight = new THREE.AmbientLight(0xffffff, 0.5);
+    scene.add(ambientLight);
+
+    const directionalLight = new THREE.DirectionalLight(0xffffff, 1);
+    directionalLight.position.set(5, 5, 5);
+    scene.add(directionalLight);
+
+    // Add axes helper
+    const axesHelper = new THREE.AxesHelper(5);
+    scene.add(axesHelper);
+
+    createTarget();
+
+    raycaster = new THREE.Raycaster();
+    mouse = new THREE.Vector2();
+
+    window.addEventListener('resize', onWindowResize);
+
+    const loader = new GLTFLoader();
+    loader.load('{{ site.baseurl }}/assets/scene/newsimple.glb', 
+      function(gltf) {
+        const box = new THREE.Box3().setFromObject(gltf.scene);
+        const center = box.getCenter(new THREE.Vector3());
+        gltf.scene.position.sub(center);
+        
+        const size = box.getSize(new THREE.Vector3());
+        const maxDim = Math.max(size.x, size.y, size.z);
+        const scale = 2 / maxDim;
+        gltf.scene.scale.multiplyScalar(scale);
+        
+        scene.add(gltf.scene);
+        model = gltf.scene;
+
+        // Find armature and bones
+        model.traverse((object) => {
+          if (object.isBone) {
+            bones.push(object);
+            if (object.name.toLowerCase() === 'joint_1') {
+              armature = object;
+            }
+          }
+        });
+
+        // Create bone lines
+        for (let i = 0; i < bones.length - 1; i++) {
+          createBoneLine(bones[i], bones[i + 1]);
+        }
+
+        // Position target at end effector
+        const endEffector = bones[bones.length - 1];
+        const endPos = endEffector.getWorldPosition(new THREE.Vector3());
+        target.position.copy(endPos);
+
+        // Create GUI after model is loaded
+        createGUI();
+      },
+      undefined,
+      function(error) {
+        console.log('Error loading GLB:', error);
+      }
+    );
+  }
+
+  function onWindowResize() {
+    camera.aspect = window.innerWidth / window.innerHeight;
+    camera.updateProjectionMatrix();
+    renderer.setSize(window.innerWidth, window.innerHeight);
+  }
+
+  function animate() {
+    requestAnimationFrame(animate);
+    controls.update();
+    
+    if (model && target) {
+      solveIK();
+      updateBoneLines();
+    }
+    
+    renderer.render(scene, camera);
+  }
+
+  function resetRotations() {
+    // Reset all bones to their initial positions
+    bones.forEach(bone => {
+      if (bone.name in jointConstraints) {
+        const constraint = jointConstraints[bone.name];
+        const euler = new THREE.Euler(0, 0, 0, constraint.rotationOrder);
+        euler[constraint.axis] = 0;
+        bone.quaternion.setFromEuler(euler);
+        bone.updateMatrix();
+        bone.updateMatrixWorld(true);
+      }
+    });
+  }
+
+  init();
+  animate();
+</script>
+
+<style>
+  body, html { 
+    margin: 0; 
+    padding: 0; 
+    overflow: hidden; 
+    height: 100vh;
+    width: 100vw;
+  }
+  canvas { 
+    display: block;
+    width: 100%;
+    height: 100%;
+    position: fixed;
+    top: 0;
+    left: 0;
+  }
+  nav {
+    position: fixed;
+    top: 0;
+    width: 100%;
+    background: rgba(0,0,0,0.7);
+    color: white;
+    padding: 10px 20px;
+    font-family: monospace;
+    z-index: 10;
+    backdrop-filter: blur(5px);
+  }
+  .nav-content {
+    display: flex;
+    justify-content: space-between;
+    align-items: center;
+    max-width: 1200px;
+    margin: 0 auto;
+  }
+  nav h1 {
+    margin: 0;
+    font-size: 1.2rem;
+  }
+  .nav-links {
+    display: flex;
+    gap: 20px;
+  }
+  .nav-link {
+    color: white;
+    text-decoration: none;
+    padding: 5px 10px;
+    border-radius: 4px;
+    transition: background-color 0.3s;
+  }
+  .nav-link:hover {
+    background: rgba(255,255,255,0.1);
+  }
+  .nav-link.active {
+    background: rgba(255,255,255,0.2);
+  }
+  #controls-container {
+    position: fixed;
+    top: 60px;
+    right: 20px;
+    background: rgba(0,0,0,0.7);
+    color: white;
+    padding: 20px;
+    font-family: monospace;
+    border-radius: 5px;
+    backdrop-filter: blur(5px);
+    z-index: 10;
+    max-height: calc(100vh - 100px);
+    overflow-y: auto;
+  }
+  .bone-controls {
+    margin-bottom: 20px;
+    padding-bottom: 20px;
+    border-bottom: 1px solid rgba(255,255,255,0.1);
+  }
+  .bone-controls h3 {
+    margin: 0 0 10px 0;
+    font-size: 1.1rem;
+  }
+  .slider-container {
+    display: flex;
+    align-items: center;
+    margin: 5px 0;
+    gap: 10px;
+  }
+  .slider-container label {
+    min-width: 100px;
+  }
+  .slider-container input[type="range"] {
+    flex: 1;
+    -webkit-appearance: none;
+    height: 4px;
+    background: rgba(255,255,255,0.2);
+    border-radius: 2px;
+    outline: none;
+  }
+  .slider-container input[type="range"]::-webkit-slider-thumb {
+    -webkit-appearance: none;
+    width: 12px;
+    height: 12px;
+    background: white;
+    border-radius: 50%;
+    cursor: pointer;
+    transition: background-color 0.3s;
+  }
+  .slider-container input[type="range"]::-webkit-slider-thumb:hover {
+    background: #ddd;
+  }
+  .value-display {
+    min-width: 50px;
+    text-align: right;
+  }
+  .reset-button {
+    position: fixed;
+    bottom: 20px;
+    right: 20px;
+    background: rgba(0,0,0,0.7);
+    color: white;
+    padding: 10px 20px;
+    font-family: monospace;
+    border-radius: 5px;
+    backdrop-filter: blur(5px);
+    z-index: 10;
+    cursor: pointer;
+    border: none;
+    transition: background-color 0.3s;
+  }
+  .reset-button:hover {
+    background: rgba(0,0,0,0.9);
+  }
+  .lil-gui {
+    z-index: 1000 !important;
+  }
+</style>
+
+<div id="controls-container"></div>
+<button class="reset-button" onclick="resetRotations()">Reset Rotations</button> 
