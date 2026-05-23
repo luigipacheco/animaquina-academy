@@ -25,126 +25,95 @@ title: Inverse Kinematics
   let model, target;
   let bones = [];
   let boneLines = [];
-  let gui, infoEl;
+  let gui;
 
-  // IK parameters (mutable via GUI)
+  // IK parameters
   let maxIterations = 10;
   let tolerance     = 0.01;
   let damping       = 0.5;
   let ikEnabled     = true;
 
-  // Canonical joint order (root → tip)
   const BONE_ORDER = ['joint_1','joint_2','joint_3','joint_4','joint_5','joint_6'];
 
-  // Match FK scene: each joint rotates on a single axis only
+  // KUKA KR10 R1100-2 official axis limits & max velocities
+  // Source: KUKA KR10 R1100-2 datasheet (0000290003_EN)
   const jointConstraints = {
-    joint_1: { axis:'y', min: THREE.MathUtils.degToRad(-170), max: THREE.MathUtils.degToRad( 170) },
-    joint_2: { axis:'x', min: THREE.MathUtils.degToRad(-190), max: THREE.MathUtils.degToRad(  45) },
-    joint_3: { axis:'x', min: THREE.MathUtils.degToRad(-120), max: THREE.MathUtils.degToRad( 156) },
-    joint_4: { axis:'y', min: THREE.MathUtils.degToRad(-185), max: THREE.MathUtils.degToRad( 185) },
-    joint_5: { axis:'x', min: THREE.MathUtils.degToRad(-120), max: THREE.MathUtils.degToRad( 120) },
-    joint_6: { axis:'y', min: THREE.MathUtils.degToRad(-350), max: THREE.MathUtils.degToRad( 350) },
+    joint_1: { axis:'y', min: THREE.MathUtils.degToRad(-170), max: THREE.MathUtils.degToRad( 170), maxVel: 156 }, // A1 ±170°
+    joint_2: { axis:'x', min: THREE.MathUtils.degToRad(-190), max: THREE.MathUtils.degToRad(  45), maxVel: 156 }, // A2 -190°/+45°
+    joint_3: { axis:'x', min: THREE.MathUtils.degToRad(-120), max: THREE.MathUtils.degToRad( 156), maxVel: 156 }, // A3 -120°/+156°
+    joint_4: { axis:'y', min: THREE.MathUtils.degToRad(-185), max: THREE.MathUtils.degToRad( 185), maxVel: 330 }, // A4 ±185°
+    joint_5: { axis:'x', min: THREE.MathUtils.degToRad(-120), max: THREE.MathUtils.degToRad( 120), maxVel: 330 }, // A5 ±120°
+    joint_6: { axis:'y', min: THREE.MathUtils.degToRad(-350), max: THREE.MathUtils.degToRad( 350), maxVel: 615 }, // A6 ±350°
   };
 
-  // Rest pose angles (delta from GLTF bind pose, in degrees)
   const initialPose = {
-    joint_1:   0,
-    joint_2:   0,
-    joint_3:   0,
-    joint_4:   0,
-    joint_5:   0,
-    joint_6:   0,
+    joint_1: 0, joint_2: 0, joint_3: 0,
+    joint_4: 0, joint_5: 0, joint_6: 0,
   };
 
-  // Bind-pose quaternions stored at load time — all pose/constraint work is
-  // done as deltas ON TOP of these so we never clobber the GLTF bind offsets.
+  // Bind-pose quaternions — all constraint/pose math is a delta on top of these
   const bindQuaternions = new Map();
 
-  // ── Joint constraint ─────────────────────────────────────────────────────────
-  // Constrain the DELTA from the bind pose, not the absolute quaternion.
-  // This preserves any bind-pose offsets baked into the GLTF (e.g. a 90° X
-  // rotation on joint_1 from Blender's Z-up → Y-up export conversion).
-  function applyJointConstraint(bone) {
-    const c      = jointConstraints[bone.name];
-    if (!c) return;
+  // Manipulability reference (set once at load time)
+  let refManipulability = null;
 
+  // ── Helpers: delta from bind pose ────────────────────────────────────────────
+  function getDeltaAngle(bone) {
+    const c     = jointConstraints[bone.name];
+    if (!c) return 0;
+    const bindQ = bindQuaternions.get(bone.name) ?? new THREE.Quaternion();
+    const dq    = new THREE.Quaternion().multiplyQuaternions(bindQ.clone().invert(), bone.quaternion);
+    return new THREE.Euler().setFromQuaternion(dq, 'XYZ')[c.axis]; // radians
+  }
+
+  // ── Joint constraint ─────────────────────────────────────────────────────────
+  function applyJointConstraint(bone) {
+    const c = jointConstraints[bone.name];
+    if (!c) return;
     const bindQ    = bindQuaternions.get(bone.name) ?? new THREE.Quaternion();
     const bindQInv = bindQ.clone().invert();
-
-    // deltaQ = bindQ⁻¹ · currentQ  (rotation relative to the bind pose)
-    const deltaQ = new THREE.Quaternion().multiplyQuaternions(bindQInv, bone.quaternion);
-
-    // Decompose delta, zero off-axes, clamp the allowed axis
-    const euler = new THREE.Euler().setFromQuaternion(deltaQ, 'XYZ');
+    const deltaQ   = new THREE.Quaternion().multiplyQuaternions(bindQInv, bone.quaternion);
+    const euler    = new THREE.Euler().setFromQuaternion(deltaQ, 'XYZ');
     if (c.axis !== 'x') euler.x = 0;
     if (c.axis !== 'y') euler.y = 0;
     if (c.axis !== 'z') euler.z = 0;
     euler[c.axis] = Math.max(c.min, Math.min(c.max, euler[c.axis]));
-
-    // Reconstruct: bindQ · constrainedDelta
     const constrainedDelta = new THREE.Quaternion().setFromEuler(euler);
     bone.quaternion.multiplyQuaternions(bindQ, constrainedDelta);
   }
 
   // ── CCD IK solver ────────────────────────────────────────────────────────────
-  //
-  // Cyclic Coordinate Descent (end → root):
-  //   For each bone (skipping the end effector itself), compute the world-space
-  //   rotation that would swing the end effector toward the target, then
-  //   convert that world-space delta into the bone's LOCAL space before applying.
-  //
-  // Key formula:
-  //   world = parent.worldQ * local
-  //   ∴ localDelta = parent.worldQ⁻¹ · worldDelta · parent.worldQ
-  //   new local  = localDelta · old local  (premultiply)
-  //
   function solveIK() {
     if (!bones.length || !target || !model) return 0;
-
     const targetPos = target.position.clone();
-    const endBone   = bones[bones.length - 1]; // joint_6 is the end effector
-
+    const endBone   = bones[bones.length - 1];
     let dist = Infinity;
 
     for (let iter = 0; iter < maxIterations; iter++) {
-      // Refresh all world matrices before reading positions
       model.updateMatrixWorld(true);
-
       const endPos = endBone.getWorldPosition(new THREE.Vector3());
       dist = endPos.distanceTo(targetPos);
       if (dist < tolerance) break;
 
-      // Iterate bones from joint_5 back to joint_1
-      // (rotating joint_6 doesn't move joint_6's own world position)
       for (let i = bones.length - 2; i >= 0; i--) {
         const bone = bones[i];
-
-        // Recompute world matrices so positions are accurate after previous step
         model.updateMatrixWorld(true);
 
         const bonePos = bone.getWorldPosition(new THREE.Vector3());
         const endPos  = endBone.getWorldPosition(new THREE.Vector3());
-
         const toEnd    = endPos.clone().sub(bonePos);
         const toTarget = targetPos.clone().sub(bonePos);
 
-        // Skip degenerate cases
         if (toEnd.lengthSq() < 1e-10 || toTarget.lengthSq() < 1e-10) continue;
         toEnd.normalize();
         toTarget.normalize();
 
         const dot = Math.min(1.0, Math.max(-1.0, toEnd.dot(toTarget)));
-        if (dot > 1.0 - 1e-6) continue; // already pointing at target
+        if (dot > 1.0 - 1e-6) continue;
 
-        // ── World-space delta rotation ──────────────────────────────────────
-        const worldDelta = new THREE.Quaternion().setFromUnitVectors(toEnd, toTarget);
-
-        // Apply damping: slerp from identity toward the full delta
-        // damping=1 → full step, damping=0.1 → very small cautious step
+        const worldDelta  = new THREE.Quaternion().setFromUnitVectors(toEnd, toTarget);
         const dampedDelta = new THREE.Quaternion().slerp(worldDelta, damping);
 
-        // ── Convert world delta → bone local space ──────────────────────────
-        //   localDelta = parentWorldQ⁻¹ · dampedDelta · parentWorldQ
         const parentWorldQ    = new THREE.Quaternion();
         if (bone.parent) bone.parent.getWorldQuaternion(parentWorldQ);
         const parentWorldQInv = parentWorldQ.clone().invert();
@@ -154,22 +123,66 @@ title: Inverse Kinematics
           parentWorldQ
         );
 
-        // ── Apply and constrain ─────────────────────────────────────────────
-        // premultiply: new local = localDelta · old local
         bone.quaternion.premultiply(localDelta);
         applyJointConstraint(bone);
-        bone.updateMatrix(); // mark local matrix dirty for next updateMatrixWorld
+        bone.updateMatrix();
       }
     }
-
     return dist;
   }
 
-  // ── Bone visualisation lines ─────────────────────────────────────────────────
+  // ── Manipulability  w = sqrt(det(J·Jᵀ)) ─────────────────────────────────────
+  // The translational Jacobian column for joint i: zᵢ × (p_end − pᵢ)
+  // where zᵢ is the joint's world-space rotation axis.
+  // As the arm approaches a singular configuration, det→0 and w→0.
+  function computeManipulability() {
+    if (!bones.length || !model) return 0;
+    model.updateMatrixWorld(true);
+    const endPos = bones[bones.length - 1].getWorldPosition(new THREE.Vector3());
+    const cols = [];
+
+    for (let i = 0; i < bones.length - 1; i++) {
+      const bone = bones[i];
+      const c    = jointConstraints[bone.name];
+      if (!c) continue;
+
+      // World-space rotation axis for this joint
+      const localAxis = new THREE.Vector3(
+        c.axis === 'x' ? 1 : 0,
+        c.axis === 'y' ? 1 : 0,
+        c.axis === 'z' ? 1 : 0
+      );
+      const wq = new THREE.Quaternion();
+      bone.getWorldQuaternion(wq);
+      localAxis.applyQuaternion(wq);
+
+      const r = endPos.clone().sub(bone.getWorldPosition(new THREE.Vector3()));
+      cols.push(new THREE.Vector3().crossVectors(localAxis, r));
+    }
+
+    if (!cols.length) return 0;
+
+    // J·Jᵀ  (3×3 symmetric matrix)
+    const M = [[0,0,0],[0,0,0],[0,0,0]];
+    for (const c of cols) {
+      const v = [c.x, c.y, c.z];
+      for (let r = 0; r < 3; r++)
+        for (let s = 0; s < 3; s++)
+          M[r][s] += v[r] * v[s];
+    }
+
+    const det =
+      M[0][0]*(M[1][1]*M[2][2] - M[1][2]*M[2][1]) -
+      M[0][1]*(M[1][0]*M[2][2] - M[1][2]*M[2][0]) +
+      M[0][2]*(M[1][0]*M[2][1] - M[1][1]*M[2][0]);
+
+    return Math.sqrt(Math.max(0, det));
+  }
+
+  // ── Bone lines ────────────────────────────────────────────────────────────────
   function createBoneLines() {
     boneLines.forEach(({ line }) => scene.remove(line));
     boneLines = [];
-
     for (let i = 0; i < bones.length - 1; i++) {
       const pts = [
         bones[i].getWorldPosition(new THREE.Vector3()),
@@ -194,22 +207,18 @@ title: Inverse Kinematics
     });
   }
 
-  // ── Target sphere ─────────────────────────────────────────────────────────────
+  // ── Target ────────────────────────────────────────────────────────────────────
   function createTarget() {
-    // Yellow sphere
     target = new THREE.Mesh(
       new THREE.SphereGeometry(0.07, 16, 16),
       new THREE.MeshBasicMaterial({ color: 0xffdd00 })
     );
-    // Orange ring
-    const ring = new THREE.Mesh(
+    target.add(new THREE.Mesh(
       new THREE.TorusGeometry(0.13, 0.012, 8, 24),
       new THREE.MeshBasicMaterial({ color: 0xff8800 })
-    );
-    target.add(ring);
+    ));
     scene.add(target);
 
-    // Attach transform gizmo so the user can drag the target
     transformControls = new TransformControls(camera, renderer.domElement);
     transformControls.attach(target);
     transformControls.setSize(0.65);
@@ -219,61 +228,182 @@ title: Inverse Kinematics
     scene.add(transformControls);
   }
 
-  // ── GUI ───────────────────────────────────────────────────────────────────────
-  function createGUI() {
-    gui = new GUI({ width: 260, title: 'IK Controls' });
+  // ── Status panel ──────────────────────────────────────────────────────────────
+  function createStatusPanel() {
+    const panel = document.createElement('div');
+    panel.id = 'sp';
 
-    const solver = gui.addFolder('Solver');
-    const p = { ikEnabled, maxIterations, tolerance, damping };
-    solver.add(p, 'ikEnabled').name('Enabled')
-      .onChange(v => { ikEnabled = v; });
-    solver.add(p, 'maxIterations', 1, 30, 1).name('Iterations')
-      .onChange(v => maxIterations = v);
-    solver.add(p, 'tolerance', 0.001, 0.1, 0.001).name('Tolerance')
-      .onChange(v => tolerance = v);
-    solver.add(p, 'damping', 0.05, 1.0, 0.05).name('Damping')
-      .onChange(v => damping = v);
-    solver.open();
+    // ── Robot name header ────────────────────────────────────
+    let html = `
+      <div class="sp-robot-header">
+        <span class="sp-robot-brand">KUKA</span>
+        <span class="sp-robot-model">KR10 R1100-2</span>
+      </div>`;
 
-    const target = gui.addFolder('Target');
-    const tCtrl = { mode: 'translate' };
-    target.add(tCtrl, 'mode', ['translate', 'rotate']).name('Gizmo mode')
-      .onChange(v => transformControls.setMode(v));
-    target.open();
+    // ── Joint limit rows ─────────────────────────────────────
+    html += '<div class="sp-section-title">AXIS LIMITS</div>';
+    html += '<table class="sp-table"><tbody>';
 
-    const actions = gui.addFolder('Actions');
-    actions.add({ reset: resetPose }, 'reset').name('Reset pose');
-    actions.open();
+    BONE_ORDER.forEach(name => {
+      const c = jointConstraints[name];
+      if (!c) return;
+      const minDeg = Math.round(THREE.MathUtils.radToDeg(c.min));
+      const maxDeg = Math.round(THREE.MathUtils.radToDeg(c.max));
+      const jNum   = name.replace('joint_', 'A');
+
+      const velLabel = c.maxVel ? `<span class="sp-vel">${c.maxVel}°/s</span>` : '';
+      html += `
+        <tr class="sp-row" id="sp-row-${name}">
+          <td class="sp-name">${jNum}</td>
+          <td class="sp-bar-cell">
+            <div class="sp-track">
+              <div class="sp-marker" id="sp-mk-${name}"></div>
+            </div>
+            <div class="sp-range-labels">
+              <span>${minDeg}°</span>${velLabel}<span>${maxDeg}°</span>
+            </div>
+          </td>
+          <td class="sp-angle" id="sp-ang-${name}">0°</td>
+        </tr>`;
+    });
+
+    html += '</tbody></table>';
+
+    // ── Manipulability gauge ──────────────────────────────────
+    html += `
+      <div class="sp-divider"></div>
+      <div class="sp-section-title">
+        MANIPULABILITY  <span class="sp-formula">w = √det(J·Jᵀ)</span>
+        <span class="sp-tick" id="sp-tick">●</span>
+      </div>
+      <div class="sp-manip-row">
+        <div class="sp-manip-track">
+          <div class="sp-manip-fill" id="sp-mfill"></div>
+        </div>
+        <span class="sp-manip-num" id="sp-mnum">—</span>
+      </div>
+      <div class="sp-sing-label" id="sp-slabel"></div>
+      <div class="sp-sing-detail" id="sp-sdetail"></div>
+    `;
+
+    panel.innerHTML = html;
+    document.body.appendChild(panel);
   }
 
-  // ── Info overlay ──────────────────────────────────────────────────────────────
-  function createInfoOverlay() {
-    infoEl = document.createElement('div');
-    infoEl.id = 'ik-info';
-    document.body.appendChild(infoEl);
-  }
+  // Singularity types we can name specifically for this 6-DOF arm
+  const SINGULARITY_TYPES = [
+    {
+      id:   'wrist',
+      test: () => {
+        const j5 = bones.find(b => b.name === 'joint_5');
+        if (!j5) return false;
+        return Math.abs(THREE.MathUtils.radToDeg(getDeltaAngle(j5))) < 10;
+      },
+      label:  '⚠ Wrist singularity',
+      detail: 'A5 ≈ 0° — A4 and A6 share the\nsame rotation axis, losing one DOF.',
+    },
+    {
+      id:   'shoulder',
+      test: () => {
+        // Shoulder singularity: wrist centre lies on J1 axis
+        if (bones.length < 4) return false;
+        model.updateMatrixWorld(true);
+        const j1Pos  = bones[0].getWorldPosition(new THREE.Vector3());
+        const endPos = bones[bones.length - 1].getWorldPosition(new THREE.Vector3());
+        // J1 axis in world space
+        const c1   = jointConstraints['joint_1'];
+        const ax   = new THREE.Vector3(
+          c1.axis === 'x' ? 1 : 0,
+          c1.axis === 'y' ? 1 : 0,
+          c1.axis === 'z' ? 1 : 0
+        );
+        bones[0].getWorldQuaternion(new THREE.Quaternion());  // ensure fresh
+        const wq = new THREE.Quaternion();
+        bones[0].getWorldQuaternion(wq);
+        ax.applyQuaternion(wq);
+        // Distance from end effector to J1 axis line
+        const toEnd = endPos.clone().sub(j1Pos);
+        const proj  = ax.clone().multiplyScalar(toEnd.dot(ax));
+        const dist  = toEnd.clone().sub(proj).length();
+        return dist < 0.15;
+      },
+      label:  '⚠ Shoulder singularity',
+      detail: 'Wrist centre on A1 axis — base\nrotation becomes indeterminate.',
+    },
+  ];
 
-  function updateInfoOverlay(dist) {
-    if (!infoEl || !bones.length) return;
-    const rows = bones
-      .filter(b => jointConstraints[b.name])
-      .map(b => {
-        const c      = jointConstraints[b.name];
-        const bindQ  = bindQuaternions.get(b.name) ?? new THREE.Quaternion();
-        const deltaQ = new THREE.Quaternion().multiplyQuaternions(bindQ.clone().invert(), b.quaternion);
-        const euler  = new THREE.Euler().setFromQuaternion(deltaQ, 'XYZ');
-        const deg    = THREE.MathUtils.radToDeg(euler[c.axis]).toFixed(1);
-        const lbl    = b.name.replace('joint_', 'J');
-        return `<span class="jlabel">${lbl}</span><span class="jval">${deg}°</span>`;
-      })
-      .join('');
+  function updateStatusPanel(dist) {
+    if (!bones.length) return;
 
-    const reached = dist < tolerance;
-    infoEl.innerHTML =
-      `<div class="info-title">IK Status</div>` +
-      `<div class="info-row"><span>distance</span><span class="${reached ? 'ok' : 'warn'}">${dist.toFixed(4)}</span></div>` +
-      `<div class="info-divider"></div>` +
-      `<div class="joints">${rows}</div>`;
+    // ── Joint limit bars ─────────────────────────────────────
+    // pct: 0% = at min limit, 50% = at centre (0 rad delta), 100% = at max limit
+    bones.forEach(bone => {
+      const c = jointConstraints[bone.name];
+      if (!c) return;
+
+      const angle  = getDeltaAngle(bone);   // radians, delta from bind pose
+      const deg    = THREE.MathUtils.radToDeg(angle);
+      const range  = c.max - c.min;          // radians
+      const pct    = Math.max(0, Math.min(100, (angle - c.min) / range * 100));
+
+      // Distance from each limit as a fraction of the full range
+      const fracLo   = (angle - c.min) / range;
+      const fracHi   = (c.max - angle) / range;
+      const atLimit  = fracLo < 0.04 || fracHi < 0.04;
+      const nearWarn = fracLo < 0.12 || fracHi < 0.12;
+
+      // Marker: positioned as % along track
+      const mk = document.getElementById(`sp-mk-${bone.name}`);
+      if (mk) {
+        mk.style.left = `${pct}%`;
+        mk.className = `sp-marker ${atLimit ? 'mk-limit' : nearWarn ? 'mk-warn' : 'mk-ok'}`;
+      }
+
+      const angEl = document.getElementById(`sp-ang-${bone.name}`);
+      if (angEl) {
+        angEl.textContent = `${deg >= 0 ? '+' : ''}${deg.toFixed(0)}°`;
+        angEl.className   = `sp-angle ${atLimit ? 'val-limit' : nearWarn ? 'val-warn' : ''}`;
+      }
+
+      const row = document.getElementById(`sp-row-${bone.name}`);
+      if (row) row.className = `sp-row ${atLimit ? 'row-limit' : nearWarn ? 'row-warn' : ''}`;
+    });
+
+    // ── Manipulability ────────────────────────────────────────
+    const m    = computeManipulability();
+    const norm = refManipulability > 0 ? Math.min(1, m / refManipulability) : 0;
+
+    const fillEl = document.getElementById('sp-mfill');
+    if (fillEl) {
+      fillEl.style.width      = `${norm * 100}%`;
+      fillEl.style.background = norm > 0.45 ? '#44ff88' : norm > 0.2 ? '#ffaa33' : '#ff4444';
+    }
+    const numEl = document.getElementById('sp-mnum');
+    if (numEl) numEl.textContent = norm.toFixed(2);
+
+    // Named singularity detection
+    const labelEl  = document.getElementById('sp-slabel');
+    const detailEl = document.getElementById('sp-sdetail');
+
+    const hit = SINGULARITY_TYPES.find(s => s.test());
+
+    if (hit) {
+      labelEl.innerHTML  = `<span class="sing-crit">${hit.label}</span>`;
+      detailEl.innerHTML = hit.detail.replace(/\n/g, '<br>');
+    } else if (norm < 0.2) {
+      labelEl.innerHTML  = '<span class="sing-crit">⚠ Near singularity</span>';
+      detailEl.innerHTML = 'The arm is losing degrees of freedom.<br>Some directions become unreachable.';
+    } else if (norm < 0.45) {
+      labelEl.innerHTML  = '<span class="sing-warn">! Reduced manipulability</span>';
+      detailEl.innerHTML = 'Arm is in a less flexible configuration.';
+    } else {
+      labelEl.innerHTML  = '<span class="sing-ok">✓ Good manipulability</span>';
+      detailEl.innerHTML = '';
+    }
+
+    // Heartbeat tick — alternates every frame to prove the panel is live
+    const tick = document.getElementById('sp-tick');
+    if (tick) tick.style.color = tick.style.color === '#44ff88' ? '#1a3a1a' : '#44ff88';
   }
 
   // ── Pose helpers ──────────────────────────────────────────────────────────────
@@ -282,9 +412,7 @@ title: Inverse Kinematics
       const c   = jointConstraints[bone.name];
       const deg = initialPose[bone.name] ?? 0;
       if (!c) return;
-
-      // Start from bind pose, then apply initial angle as a delta on the constraint axis
-      const bindQ = bindQuaternions.get(bone.name) ?? new THREE.Quaternion();
+      const bindQ      = bindQuaternions.get(bone.name) ?? new THREE.Quaternion();
       const deltaEuler = new THREE.Euler(0, 0, 0, 'XYZ');
       deltaEuler[c.axis] = THREE.MathUtils.degToRad(deg);
       const deltaQ = new THREE.Quaternion().setFromEuler(deltaEuler);
@@ -295,92 +423,104 @@ title: Inverse Kinematics
   }
 
   function resetPose() {
-    // Restore exact bind-pose quaternions, then reposition the target
     bones.forEach(bone => {
-      const bindQ = bindQuaternions.get(bone.name);
-      if (bindQ) { bone.quaternion.copy(bindQ); bone.updateMatrix(); }
+      const bq = bindQuaternions.get(bone.name);
+      if (bq) { bone.quaternion.copy(bq); bone.updateMatrix(); }
     });
     model.updateMatrixWorld(true);
     const endBone = bones[bones.length - 1];
     target.position.copy(endBone.getWorldPosition(new THREE.Vector3()));
   }
 
+  // ── GUI ───────────────────────────────────────────────────────────────────────
+  function createGUI() {
+    gui = new GUI({ width: 240, title: 'IK Controls' });
+
+    const solver = gui.addFolder('Solver');
+    const p = { ikEnabled, maxIterations, tolerance, damping };
+    solver.add(p, 'ikEnabled').name('Enabled').onChange(v => ikEnabled = v);
+    solver.add(p, 'maxIterations', 1, 30, 1).name('Iterations').onChange(v => maxIterations = v);
+    solver.add(p, 'tolerance', 0.001, 0.1, 0.001).name('Tolerance').onChange(v => tolerance = v);
+    solver.add(p, 'damping', 0.05, 1.0, 0.05).name('Damping').onChange(v => damping = v);
+    solver.open();
+
+    const tgt = gui.addFolder('Target');
+    const tc = { mode: 'translate' };
+    tgt.add(tc, 'mode', ['translate', 'rotate']).name('Gizmo mode')
+      .onChange(v => transformControls.setMode(v));
+    tgt.open();
+
+    const act = gui.addFolder('Actions');
+    act.add({ reset: resetPose }, 'reset').name('Reset pose');
+    act.open();
+  }
+
   // ── Init ──────────────────────────────────────────────────────────────────────
   function init() {
-    // Scene
     scene = new THREE.Scene();
     scene.background = new THREE.Color(0x0d0d0d);
     scene.fog = new THREE.FogExp2(0x0d0d0d, 0.04);
 
-    // Camera
     camera = new THREE.PerspectiveCamera(45, window.innerWidth / window.innerHeight, 0.1, 100);
     camera.position.set(0, 4, 9);
 
-    // Renderer
     renderer = new THREE.WebGLRenderer({ antialias: true });
     renderer.setSize(window.innerWidth, window.innerHeight);
     renderer.setPixelRatio(window.devicePixelRatio);
     renderer.shadowMap.enabled = true;
     document.body.appendChild(renderer.domElement);
 
-    // Controls
     orbitControls = new OrbitControls(camera, renderer.domElement);
-    orbitControls.enableDamping  = true;
-    orbitControls.dampingFactor  = 0.05;
-    orbitControls.minDistance    = 1;
-    orbitControls.maxDistance    = 20;
+    orbitControls.enableDamping = true;
+    orbitControls.dampingFactor = 0.05;
+    orbitControls.minDistance   = 1;
+    orbitControls.maxDistance   = 20;
 
-    // Lights
     scene.add(new THREE.AmbientLight(0xffffff, 0.5));
     const dir = new THREE.DirectionalLight(0xffffff, 1.2);
     dir.position.set(5, 8, 5);
     dir.castShadow = true;
     scene.add(dir);
-
-    // Grid floor
     scene.add(new THREE.GridHelper(12, 24, 0x2a2a2a, 0x1a1a1a));
 
-    // Target + info
     createTarget();
-    createInfoOverlay();
 
-    // Resize
     window.addEventListener('resize', () => {
       camera.aspect = window.innerWidth / window.innerHeight;
       camera.updateProjectionMatrix();
       renderer.setSize(window.innerWidth, window.innerHeight);
     });
 
-    // Load model
     const loader = new GLTFLoader();
     loader.load('{{ site.baseurl }}/assets/scene/newsimple.glb',
       gltf => {
-        // Centre + normalise scale
         const box    = new THREE.Box3().setFromObject(gltf.scene);
         const centre = box.getCenter(new THREE.Vector3());
         gltf.scene.position.sub(centre);
         const size  = box.getSize(new THREE.Vector3());
-        const scale = 2 / Math.max(size.x, size.y, size.z);
-        gltf.scene.scale.multiplyScalar(scale);
+        gltf.scene.scale.multiplyScalar(2 / Math.max(size.x, size.y, size.z));
 
         scene.add(gltf.scene);
         model = gltf.scene;
 
-        // Collect bones in canonical order
         const boneMap = new Map();
         model.traverse(obj => { if (obj.isBone) boneMap.set(obj.name, obj); });
-        BONE_ORDER.forEach(name => { if (boneMap.has(name)) bones.push(boneMap.get(name)); });
+        BONE_ORDER.forEach(n => { if (boneMap.has(n)) bones.push(boneMap.get(n)); });
         console.log('IK chain:', bones.map(b => b.name).join(' → '));
 
-        // Store bind-pose quaternions BEFORE touching anything
+        // Store bind pose BEFORE touching anything
         bones.forEach(b => bindQuaternions.set(b.name, b.quaternion.clone()));
 
-        // Set rest pose then place target at the end effector
         applyInitialPose();
         const endBone = bones[bones.length - 1];
         target.position.copy(endBone.getWorldPosition(new THREE.Vector3()));
 
+        // Reference manipulability at the rest pose
+        refManipulability = computeManipulability();
+        if (refManipulability < 1e-6) refManipulability = 1; // fallback
+
         createBoneLines();
+        createStatusPanel();
         createGUI();
       },
       undefined,
@@ -399,7 +539,7 @@ title: Inverse Kinematics
       updateBoneLines();
     }
 
-    updateInfoOverlay(dist);
+    if (model) updateStatusPanel(dist);
     renderer.render(scene, camera);
   }
 
@@ -409,11 +549,9 @@ title: Inverse Kinematics
 
 <style>
   body, html {
-    margin: 0;
-    padding: 0;
+    margin: 0; padding: 0;
     overflow: hidden;
-    height: 100vh;
-    width: 100vw;
+    height: 100vh; width: 100vw;
   }
   canvas {
     display: block;
@@ -421,51 +559,188 @@ title: Inverse Kinematics
     top: 0; left: 0;
     width: 100%; height: 100%;
   }
-  .lil-gui {
-    z-index: 1000 !important;
-  }
+  .lil-gui { z-index: 1000 !important; }
 
-  /* Info overlay */
-  #ik-info {
+  /* ── Status panel ───────────────────────────────────────────── */
+  #sp {
     position: fixed;
-    bottom: 20px;
-    left: 20px;
-    background: rgba(0, 0, 0, 0.72);
-    color: #e0e0e0;
+    top: 56px;
+    left: 14px;
+    width: 290px;
+    background: rgba(8, 8, 8, 0.82);
+    color: #d8d8d8;
     font-family: monospace;
     font-size: 12px;
-    line-height: 1.7;
-    padding: 12px 16px;
-    border-radius: 6px;
-    backdrop-filter: blur(6px);
+    border-radius: 7px;
+    border: 1px solid rgba(255,255,255,0.07);
+    backdrop-filter: blur(8px);
+    padding: 12px 14px 14px;
     z-index: 10;
-    min-width: 210px;
     pointer-events: none;
-    border: 1px solid rgba(255,255,255,0.08);
+    user-select: none;
   }
-  .info-title {
-    font-size: 11px;
+
+  /* robot name header */
+  .sp-robot-header {
+    display: flex;
+    align-items: baseline;
+    gap: 7px;
+    margin-bottom: 10px;
+    padding-bottom: 8px;
+    border-bottom: 1px solid rgba(255,255,255,0.06);
+  }
+  .sp-robot-brand {
+    font-size: 10px;
+    letter-spacing: 0.18em;
+    color: #ff6600;
     text-transform: uppercase;
-    letter-spacing: 0.1em;
-    color: #888;
-    margin-bottom: 4px;
   }
-  .info-row {
+  .sp-robot-model {
+    font-size: 13px;
+    color: #ccc;
+    font-weight: bold;
+    letter-spacing: 0.05em;
+  }
+
+  .sp-section-title {
+    font-size: 10px;
+    text-transform: uppercase;
+    letter-spacing: 0.14em;
+    color: #555;
+    margin-bottom: 9px;
+  }
+  .sp-formula {
+    color: #444;
+    font-size: 9px;
+    letter-spacing: 0;
+    text-transform: none;
+  }
+  .sp-tick {
+    float: right;
+    font-size: 8px;
+    transition: color 0.05s;
+  }
+
+  /* joint table */
+  .sp-table {
+    width: 100%;
+    border-collapse: collapse;
+  }
+  .sp-row td { padding: 2px 0; }
+  .sp-row.row-warn  { background: rgba(255,170,51,0.06); border-radius: 3px; }
+  .sp-row.row-limit { background: rgba(255,60,60,0.10);  border-radius: 3px; }
+
+  .sp-name {
+    width: 24px;
+    color: #666;
+    font-size: 11px;
+    padding-right: 6px;
+  }
+
+  /* track bar */
+  .sp-bar-cell { width: 100%; }
+
+  .sp-track {
+    position: relative;
+    height: 10px;
+    border-radius: 5px;
+    /* dimmed gradient background: red at edges, green in middle */
+    background: linear-gradient(to right,
+      #5a1a1a 0%, #6b3010 10%,
+      #1a4a2a 20%, #1a4a2a 80%,
+      #6b3010 90%, #5a1a1a 100%
+    );
+    margin: 3px 0 1px;
+    border: 1px solid #333;
+  }
+
+  /* The marker sits ON TOP of the track using z-index, separate from the track's opacity */
+  .sp-marker {
+    position: absolute;
+    top: 50%;
+    /* translateX(-50%) centres the marker on its left% position */
+    transform: translate(-50%, -50%);
+    width: 12px;
+    height: 12px;
+    border-radius: 50%;
+    border: 2px solid #000;
+    transition: left 0.05s linear, background 0.15s;
+    box-shadow: 0 0 0 1px rgba(255,255,255,0.3), 0 2px 6px rgba(0,0,0,0.8);
+    z-index: 2;
+  }
+  .mk-ok    { background: #c8f0d0; }
+  .mk-warn  { background: #ffaa33; }
+  .mk-limit { background: #ff4444; animation: pulse 0.5s infinite alternate; }
+
+  @keyframes pulse {
+    from { box-shadow: 0 0 4px #ff4444; }
+    to   { box-shadow: 0 0 10px #ff4444, 0 0 3px #fff; }
+  }
+
+  .sp-range-labels {
     display: flex;
     justify-content: space-between;
-    gap: 16px;
+    font-size: 9px;
+    color: #3a3a3a;
+    margin-top: 1px;
   }
-  .info-divider {
-    border-top: 1px solid rgba(255,255,255,0.1);
-    margin: 6px 0;
+  .sp-vel {
+    font-size: 8px;
+    color: #2a4a3a;
+    letter-spacing: 0;
   }
-  .ok   { color: #44ff88; }
-  .warn { color: #ffaa33; }
-  .joints {
-    display: grid;
-    grid-template-columns: 1fr 1fr;
-    column-gap: 20px;
+
+  .sp-angle {
+    width: 42px;
+    text-align: right;
+    font-size: 11px;
+    color: #aaa;
+    padding-left: 6px;
+    white-space: nowrap;
   }
-  .jlabel { color: #888; }
-  .jval   { text-align: right; color: #ddd; }
+  .val-warn  { color: #ffaa33; }
+  .val-limit { color: #ff5555; font-weight: bold; }
+
+  /* divider */
+  .sp-divider {
+    border: none;
+    border-top: 1px solid rgba(255,255,255,0.06);
+    margin: 11px 0 10px;
+  }
+
+  /* manipulability gauge */
+  .sp-manip-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 7px;
+  }
+  .sp-manip-track {
+    flex: 1;
+    height: 10px;
+    background: #1c1c1c;
+    border-radius: 5px;
+    overflow: hidden;
+    border: 1px solid #2a2a2a;
+  }
+  .sp-manip-fill {
+    height: 100%;
+    border-radius: 5px;
+    transition: width 0.1s, background 0.4s;
+    background: #44ff88;
+  }
+  .sp-manip-num {
+    width: 34px;
+    text-align: right;
+    font-size: 11px;
+    color: #aaa;
+  }
+
+  /* singularity labels */
+  .sp-sing-label  { font-size: 11px; margin: 2px 0 3px; min-height: 16px; }
+  .sp-sing-detail { font-size: 10px; color: #666; line-height: 1.55; min-height: 28px; }
+
+  .sing-ok   { color: #44ff88; }
+  .sing-warn { color: #ffaa33; }
+  .sing-crit { color: #ff5050; font-weight: bold; }
 </style>
